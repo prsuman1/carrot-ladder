@@ -42,18 +42,12 @@ ZONE_COLORS = {
     "past_T2": "#9BC2E6",
 }
 
-# Theme detection — Streamlit ≥1.45 exposes st.context.theme.type
-try:
-    theme_base = st.context.theme.type
-except Exception:
-    theme_base = st.get_option("theme.base") or "light"
-IS_DARK = theme_base == "dark"
-
-PLOTLY_TEMPLATE = "plotly_dark" if IS_DARK else "plotly_white"
-GRID_COLOR = "rgba(255,255,255,0.10)" if IS_DARK else "rgba(0,0,0,0.08)"
-TEXT_COLOR = "#E6E6E6" if IS_DARK else "#222222"
-HEADING    = "#9DC3E6" if IS_DARK else "#1F4E78"
-MUTED      = "#A0A0A0" if IS_DARK else "#606060"
+# App is locked to light mode — see .streamlit/config.toml for the Streamlit chrome.
+PLOTLY_TEMPLATE = "plotly_white"
+GRID_COLOR = "rgba(0,0,0,0.08)"
+TEXT_COLOR = "#222222"
+HEADING    = "#1F4E78"
+MUTED      = "#606060"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -135,7 +129,7 @@ def concentration_figure(curve: pd.DataFrame) -> go.Figure:
         mode="lines",
         line=dict(color=HEADING, width=2.5),
         fill="tozeroy",
-        fillcolor="rgba(31,78,120,0.10)" if not IS_DARK else "rgba(157,195,230,0.12)",
+        fillcolor="rgba(31,78,120,0.10)",
         name="Revenue concentration",
         hovertemplate="Top %{x:.1f}% of bills<br>= %{y:.1f}% of revenue<extra></extra>",
         showlegend=False,
