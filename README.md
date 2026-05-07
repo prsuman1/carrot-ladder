@@ -4,10 +4,12 @@ Interactive Streamlit app for picking upsell thresholds (T1, T2) on top of a 90-
 
 ## Quickstart (developer)
 1. `python -m venv .venv && source .venv/bin/activate`
-2. `pip install -r requirements.txt`
+2. `pip install -r requirements.txt -r requirements-dev.txt`
 3. Copy `.env.example` to `.env`, fill in Redshift creds.
 4. `python build_data.py`   # writes data/*.parquet, data/*.json
 5. `streamlit run app.py`
+
+`requirements.txt` covers the runtime app only (streamlit + numpy/pandas/plotly/pyarrow). `requirements-dev.txt` adds psycopg2 and python-dotenv, which are needed by `build_data.py` but not the deployed app.
 
 ## Deploy (production)
 - Push to git (data/ is committed; .env is not).

@@ -1,0 +1,5 @@
+# Used by build_data.py only — not by the runtime app.
+# Install locally before running build_data.py:
+#   pip install -r requirements.txt -r requirements-dev.txt
+psycopg2-binary>=2.9
+python-dotenv>=1.0
