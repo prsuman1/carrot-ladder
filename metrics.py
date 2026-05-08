@@ -2,78 +2,197 @@
 
 All input is the small ~7k-row histogram with columns (bin, count, sum_value).
 Slider-driven recomputation runs through here — never through cached file loads.
+
+Generalized to N tiers (1..5). The thresholds list is the source of truth.
 """
 
 from __future__ import annotations
 
 import math
-from typing import Dict
+from typing import Dict, List, Sequence
 
 import pandas as pd
 
 
-def zone_counts(vd: pd.DataFrame, total_n: int, T1: float, T2: float, reach: float) -> Dict[str, float]:
-    """Compute the five-zone partition for a (T1, T2) pair under a reach window.
+def zone_counts(vd: pd.DataFrame, total_n: int, thresholds: Sequence[float], reach: float) -> Dict:
+    """Compute the (2N+1)-zone partition for a sorted thresholds list.
 
-    Zones (every bill falls into exactly one):
-      1. Unreachable        bill < lo1
-      2. Within reach T1    lo1 <= bill < T1
-      3. Past T1, mid-zone  T1 <= bill < lo2
-      4. Within reach T2    lo2 <= bill < T2
-      5. Past T2            bill >= T2
+    Returns a dict with:
+      - tiers: list of dicts {tier, T, lo, count_in_reach, pct_in_reach,
+                              sum_in_reach, avg_gap, gap_ratio}
+      - mid_zones: list of dicts {after_tier, lo, hi, count, pct} (one per gap
+                   between consecutive tiers)
+      - n_unreachable, pct_unreachable (bills below lo of T1)
+      - n_past_top, pct_past_top (bills at or above the top tier — wasted carrot)
     """
-    lo1 = reach * T1
-    lo2 = max(T1, reach * T2)
-
     bins = vd["bin"].values
     counts = vd["count"].values
     sums = vd["sum_value"].values
 
-    def slice_count_and_sum(lo: float, hi: float):
+    def slice_count_sum(lo, hi):
         m = (bins >= lo) & (bins < hi)
         return int(counts[m].sum()), float(sums[m].sum())
 
-    n_unreach, _ = slice_count_and_sum(0, lo1)
-    n_inreach1, sum_inreach1 = slice_count_and_sum(lo1, T1)
-    n_mid, _ = slice_count_and_sum(T1, lo2)
-    n_inreach2, sum_inreach2 = slice_count_and_sum(lo2, T2)
-    m_ge_T2 = bins >= T2
-    n_past2 = int(counts[m_ge_T2].sum())
+    los: List[float] = []
+    prev = 0.0
+    for T in thresholds:
+        lo = max(prev, reach * T)
+        los.append(lo)
+        prev = T
 
-    pct_unreachable = n_unreach / total_n * 100
-    pct_within_reach_T1 = n_inreach1 / total_n * 100
-    pct_mid_zone = n_mid / total_n * 100
-    pct_within_reach_T2 = n_inreach2 / total_n * 100
-    pct_ge_T2 = n_past2 / total_n * 100
-    pct_ge_T1 = (n_mid + n_inreach2 + n_past2) / total_n * 100
+    tiers = []
+    for i, T in enumerate(thresholds):
+        lo = los[i]
+        c, s = slice_count_sum(lo, T)
+        gap_ratio = 0.0 if c == 0 else (T - s / c) / T
+        tiers.append({
+            "tier": i + 1,
+            "T": T,
+            "lo": lo,
+            "count_in_reach": c,
+            "pct_in_reach": c / total_n * 100,
+            "sum_in_reach": s,
+            "avg_gap": (T - s / c) if c > 0 else math.nan,
+            "gap_ratio": gap_ratio,
+        })
 
-    avg_gap_T1 = (T1 - sum_inreach1 / n_inreach1) if n_inreach1 else math.nan
-    avg_gap_T2 = (T2 - sum_inreach2 / n_inreach2) if n_inreach2 else math.nan
+    mid_zones = []
+    for i in range(len(thresholds) - 1):
+        lo_mz = thresholds[i]
+        hi_mz = los[i + 1]
+        c, _ = slice_count_sum(lo_mz, hi_mz)
+        mid_zones.append({
+            "after_tier": i + 1,
+            "lo": lo_mz,
+            "hi": hi_mz,
+            "count": c,
+            "pct": c / total_n * 100,
+        })
+
+    n_unreach, _ = slice_count_sum(0, los[0])
+    n_past_top, _ = slice_count_sum(thresholds[-1], 10**9)
 
     return {
-        "pct_unreachable": pct_unreachable,
-        "pct_within_reach_T1": pct_within_reach_T1,
-        "pct_mid_zone": pct_mid_zone,
-        "pct_within_reach_T2": pct_within_reach_T2,
-        "pct_ge_T2": pct_ge_T2,
-        "pct_ge_T1": pct_ge_T1,
-        "avg_gap_T1": avg_gap_T1,
-        "avg_gap_T2": avg_gap_T2,
-        "lo1": lo1,
-        "lo2": lo2,
-        "n_unreach": n_unreach,
-        "n_within_reach_T1": n_inreach1,
-        "n_mid_zone": n_mid,
-        "n_within_reach_T2": n_inreach2,
-        "n_ge_T2": n_past2,
+        "thresholds": list(thresholds),
+        "los": los,
+        "tiers": tiers,
+        "mid_zones": mid_zones,
+        "n_unreachable": n_unreach,
+        "pct_unreachable": n_unreach / total_n * 100,
+        "n_past_top": n_past_top,
+        "pct_past_top": n_past_top / total_n * 100,
     }
 
 
-def score_pair(metrics: Dict[str, float], alpha: float = 1.0) -> Dict[str, float]:
-    reach_score = metrics["pct_within_reach_T1"] + metrics["pct_within_reach_T2"]
-    waste = metrics["pct_ge_T2"]
+def expected_lift(zones: Dict, response_rate: float, gap_aware: bool = True) -> Dict:
+    """Per-tier earned and free counts (% of all bills) under the single-gift model.
+
+    Each bill receives at most one gift — the highest tier it crosses. So:
+      earned_per_tier[i] = response_rate × pct_in_reach[i] × gap_factor[i]
+      free_per_tier[i]   = mid_zone_pct[i]                                              # if i < N
+                         + pct_in_reach[i+1] × (1 − response_rate × gap_factor[i+1])    # if i+1 ≤ N
+                         (or pct_past_top for i = N − 1)
+
+    With gap_aware=True, gap_factor = 1 − gap_ratio.
+    """
+    n_tiers = len(zones["tiers"])
+
+    earned_per_tier: list[float] = []
+    for t in zones["tiers"]:
+        gap_factor = (1 - t["gap_ratio"]) if gap_aware else 1.0
+        earned_per_tier.append(response_rate * t["pct_in_reach"] * gap_factor)
+
+    free_per_tier: list[float] = []
+    for i in range(n_tiers):
+        if i < n_tiers - 1:
+            next_t = zones["tiers"][i + 1]
+            next_gap = (1 - next_t["gap_ratio"]) if gap_aware else 1.0
+            non_convert = 1.0 - response_rate * next_gap
+            free = zones["mid_zones"][i]["pct"] + non_convert * next_t["pct_in_reach"]
+        else:
+            free = zones["pct_past_top"]
+        free_per_tier.append(free)
+
+    earned_total = sum(earned_per_tier)
+    free_total = sum(free_per_tier)
+
     return {
-        "reach_score": reach_score,
+        "per_tier": earned_per_tier,
+        "earned_per_tier": earned_per_tier,
+        "total": earned_total,
+        "earned_total": earned_total,
+        "free_per_tier": free_per_tier,
+        "free_total": free_total,
+    }
+
+
+def money_breakdown(
+    lift: Dict,
+    zones: Dict,
+    gift_costs: Sequence[float],
+    n_bills: int,
+    months_in_window: float = 3.0,
+    rgm_rate: float = 0.36,
+) -> Dict:
+    """Per-tier and total ₹/month earn (RGM) and burn (gift cost).
+
+    Burn at tier i = (earned + free) × gift_cost_i — every gift handed out costs cash.
+    Revenue at tier i = avg_gap × earned_bills (incremental top-line from program).
+    RGM = Revenue × rgm_rate (the contribution-margin slice that's actually money).
+    """
+    pm = lambda count_pct: (count_pct / 100.0) * n_bills / months_in_window
+    per_tier = []
+    total_rev = total_rgm = total_burn = 0.0
+    for i, t in enumerate(zones["tiers"]):
+        earned_bills = pm(lift["earned_per_tier"][i])
+        free_bills = pm(lift["free_per_tier"][i])
+        avg_gap = t["avg_gap"]
+        if avg_gap is None or (isinstance(avg_gap, float) and avg_gap != avg_gap):
+            avg_gap = 0.0
+        revenue = avg_gap * earned_bills
+        rgm = revenue * rgm_rate
+        burn = (earned_bills + free_bills) * gift_costs[i]
+        per_tier.append({
+            "tier": i + 1,
+            "T": t["T"],
+            "gift_cost": gift_costs[i],
+            "earned_bills": earned_bills,
+            "free_bills": free_bills,
+            "avg_gap": avg_gap,
+            "revenue": revenue,
+            "rgm": rgm,
+            "burn": burn,
+            "net": rgm - burn,
+        })
+        total_rev += revenue
+        total_rgm += rgm
+        total_burn += burn
+    return {
+        "per_tier": per_tier,
+        "revenue": total_rev,
+        "rgm": total_rgm,
+        "burn": total_burn,
+        "net": total_rgm - total_burn,
+        "rgm_rate": rgm_rate,
+    }
+
+
+def score_pair(zones: Dict, lift: Dict, alpha: float = 1.0) -> Dict:
+    """Generalized score for an N-tier configuration under the single-gift model.
+
+    reach_score        = sum of pct_in_reach across tiers (theoretical addressable %)
+    wasted_carrot_pct  = lift['free_total'] (sum of per-tier free gifts)
+    adjusted_score     = reach_score − α × wasted_carrot_pct
+    expected_lift      = lift['total'] (= earned_total %)
+    adjusted_expected  = expected_lift − α × wasted_carrot_pct
+    """
+    reach = sum(t["pct_in_reach"] for t in zones["tiers"])
+    waste = lift["free_total"]
+    lift_total = lift["total"]
+    return {
+        "reach_score": reach,
         "wasted_carrot_pct": waste,
-        "adjusted_score": reach_score - alpha * waste,
+        "adjusted_score": reach - alpha * waste,
+        "expected_lift": lift_total,
+        "adjusted_expected": lift_total - alpha * waste,
     }
