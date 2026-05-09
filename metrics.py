@@ -133,11 +133,15 @@ def money_breakdown(
     n_bills: int,
     months_in_window: float = 3.0,
     rgm_rate: float = 0.36,
+    kappa: float = 1.30,
 ) -> Dict:
     """Per-tier and total ₹/month earn (RGM) and burn (gift cost).
 
+    kappa = revenue overshoot multiplier. Customers crossing a threshold typically
+    buy more than the bare gap (empirically ~1.30× gap — they round up by adding
+    an extra item). Revenue per earned bill = avg_gap × kappa.
+
     Burn at tier i = (earned + free) × gift_cost_i — every gift handed out costs cash.
-    Revenue at tier i = avg_gap × earned_bills (incremental top-line from program).
     RGM = Revenue × rgm_rate (the contribution-margin slice that's actually money).
     """
     pm = lambda count_pct: (count_pct / 100.0) * n_bills / months_in_window
@@ -149,7 +153,7 @@ def money_breakdown(
         avg_gap = t["avg_gap"]
         if avg_gap is None or (isinstance(avg_gap, float) and avg_gap != avg_gap):
             avg_gap = 0.0
-        revenue = avg_gap * earned_bills
+        revenue = avg_gap * kappa * earned_bills
         rgm = revenue * rgm_rate
         burn = (earned_bills + free_bills) * gift_costs[i]
         per_tier.append({
@@ -174,7 +178,41 @@ def money_breakdown(
         "burn": total_burn,
         "net": total_rgm - total_burn,
         "rgm_rate": rgm_rate,
+        "kappa": kappa,
     }
+
+
+def breakeven_cashback(
+    vd: pd.DataFrame,
+    thresholds: Sequence[float],
+    reach: float,
+    response_rate: float,
+    gap_aware: bool,
+    n_bills: int,
+    months_in_window: float = 3.0,
+    rgm_rate: float = 0.36,
+    kappa: float = 1.30,
+    lo: float = 0.0001,
+    hi: float = 0.30,
+    iters: int = 50,
+) -> float:
+    """Binary search for the per-tier cashback rate (as fraction of T) at which
+    Net = RGM − Burn = 0. Returns float in [lo, hi]. If no break-even exists in
+    range (e.g. always net-negative even at very low cashback), returns lo
+    (minimum tested rate). If always net-positive in range, returns hi.
+    """
+    z = zone_counts(vd, n_bills, thresholds, reach)
+    lf = expected_lift(z, response_rate, gap_aware)
+    # Quick boundary check
+    for _ in range(iters):
+        mid = (lo + hi) / 2
+        gifts = [mid * T for T in thresholds]
+        mb = money_breakdown(lf, z, gifts, n_bills, months_in_window, rgm_rate, kappa)
+        if mb["net"] >= 0:
+            lo = mid
+        else:
+            hi = mid
+    return lo
 
 
 def score_pair(zones: Dict, lift: Dict, alpha: float = 1.0) -> Dict:

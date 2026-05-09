@@ -28,7 +28,7 @@ from data_loader import (
     load_topline,
     load_value_distribution,
 )
-from metrics import expected_lift, money_breakdown, score_pair, zone_counts
+from metrics import breakeven_cashback, expected_lift, money_breakdown, score_pair, zone_counts
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -242,11 +242,27 @@ with st.sidebar:
 
     st.divider()
 
+    # Consume any pending "Apply this ladder" request from the Break-even section.
+    # Must happen BEFORE the n_tiers radio + T sliders + gift inputs are created so
+    # we can write to their session_state keys without conflict.
+    pending = st.session_state.pop("__pending_apply__", None)
+    if pending is not None:
+        st.session_state["__n_tiers_radio__"] = pending["n_tiers"]
+        for i, T in enumerate(pending["T_values"]):
+            st.session_state[f"T_{i + 1}"] = int(T)
+        for i, g in enumerate(pending["gift_values"]):
+            st.session_state[f"gift_{i + 1}"] = int(g)
+        if "reach_pct" in pending:
+            st.session_state["__reach_slider__"] = int(pending["reach_pct"])
+
+    # Pre-seed the radio's session_state so we never need to pass index= alongside key=.
+    if "__n_tiers_radio__" not in st.session_state:
+        st.session_state["__n_tiers_radio__"] = 2
     n_tiers = st.radio(
         "Number of tiers",
         options=[1, 2, 3, 4, 5],
-        index=1,
         horizontal=True,
+        key="__n_tiers_radio__",
     )
 
     st.subheader("Thresholds")
@@ -295,12 +311,15 @@ with st.sidebar:
     gift_costs = [float(st.session_state[f"gift_{i + 1}"]) for i in range(n_tiers)]
 
     st.subheader("Reach window")
+    if "__reach_slider__" not in st.session_state:
+        st.session_state["__reach_slider__"] = 75
     reach_pct = st.slider(
         "Reach window",
-        min_value=60, max_value=95, value=75, step=5,
+        min_value=60, max_value=95, step=5,
         format="%d%%",
         label_visibility="collapsed",
         help="A bill is 'within reach' of T if reach × T ≤ bill < T.",
+        key="__reach_slider__",
     )
     reach = reach_pct / 100.0
 
@@ -320,6 +339,19 @@ with st.sidebar:
 
     st.subheader("Waste penalty (α)")
     alpha = st.slider("α", min_value=0.0, max_value=3.0, value=1.0, step=0.5)
+
+    st.subheader("Revenue overshoot (%)")
+    overshoot_pct = st.slider(
+        "Revenue overshoot",
+        min_value=0, max_value=100, value=30, step=5,
+        format="%d%%", label_visibility="collapsed",
+        help=(
+            "Customers crossing a threshold typically buy more than the bare 'gap' rupees. "
+            "Empirically ~30% extra (e.g., need ₹50 to cross — actually buy ₹65 worth). "
+            "Higher = more revenue per earned bill. Set to 0 to disable."
+        ),
+    )
+    kappa = 1.0 + overshoot_pct / 100.0
 
     st.subheader("Gross margin (%)")
     rgm_pct = st.slider(
@@ -343,7 +375,7 @@ with st.sidebar:
 zones = zone_counts(vd, N_BILLS, thresholds, reach)
 lift = expected_lift(zones, response_rate, gap_aware)
 sc = score_pair(zones, lift, alpha)
-money = money_breakdown(lift, zones, gift_costs, N_BILLS, MONTHS_IN_WINDOW, rgm_rate)
+money = money_breakdown(lift, zones, gift_costs, N_BILLS, MONTHS_IN_WINDOW, rgm_rate, kappa)
 
 # ---------------------------------------------------------------------------
 # Section 1 — Header
@@ -589,7 +621,7 @@ st.divider()
 # ---------------------------------------------------------------------------
 st.header("Money model (₹)")
 st.caption(
-    f"**Earn** = avg gap × earned bills × {rgm_pct}% gross margin = RGM. "
+    f"**Earn** = avg gap × {kappa:.2f} (overshoot) × earned bills × {rgm_pct}% gross margin = RGM. "
     "**Burn** = (earned + free) bills × gift cost per tier — every gift handed out costs cash. "
     "**Net** = RGM − Burn. Tune gift values inline with each T in the sidebar."
 )
@@ -644,6 +676,111 @@ def _net_color(val: str) -> str:
 
 styled_money = df_money.style.map(_net_color, subset=["Net /mo"])
 st.dataframe(styled_money, hide_index=True, width="stretch")
+
+st.divider()
+
+# ---------------------------------------------------------------------------
+# Section 5c — Break-even analysis
+# ---------------------------------------------------------------------------
+st.header("Break-even analysis")
+st.caption(
+    "**Break-even cashback** = the per-tier cashback rate (as % of each threshold) "
+    "where Net = ₹0. Below this rate the program is profitable; above it, it loses money. "
+    f"Numbers update live with your sidebar settings (response = **{response_pct}%**, "
+    f"RGM = **{rgm_pct}%**, overshoot = **{overshoot_pct}%**, gap-aware = "
+    f"**{'on' if gap_aware else 'off'}**)."
+)
+
+REFERENCE_LADDERS = [
+    {"name": "Pure ROI",
+     "thr": [600, 850, 1200, 1750, 2500],
+     "reach": 0.70,
+     "tagline": "Highest ROI of all configurations (narrow but profitable)"},
+    {"name": "35% coverage · 5 tiers",
+     "thr": [350, 500, 700, 1000, 1450],
+     "reach": 0.70,
+     "tagline": "Best balance of reach + ROI at 35% coverage"},
+    {"name": "35% coverage · 4 tiers",
+     "thr": [350, 500, 700, 1000],
+     "reach": 0.70,
+     "tagline": "Simpler 4-tier alternative at the same coverage"},
+    {"name": "50% coverage · 5 tiers",
+     "thr": [200, 300, 425, 600, 850],
+     "reach": 0.70,
+     "tagline": "Maximum reach into the bill base (touches 1 in 2 bills)"},
+]
+
+be_rows = []
+for L in REFERENCE_LADDERS:
+    z_L = zone_counts(vd, N_BILLS, L["thr"], L["reach"])
+    lf_L = expected_lift(z_L, response_rate, gap_aware)
+    cov_L = sum(lf_L["earned_per_tier"]) + sum(lf_L["free_per_tier"])
+    be_L = breakeven_cashback(vd, L["thr"], L["reach"], response_rate, gap_aware,
+                              N_BILLS, MONTHS_IN_WINDOW, rgm_rate, kappa)
+    gifts_3 = [0.03 * T for T in L["thr"]]
+    mb_L = money_breakdown(lf_L, z_L, gifts_3, N_BILLS, MONTHS_IN_WINDOW, rgm_rate, kappa)
+    be_rows.append({
+        "Ladder": L["name"],
+        "Thresholds": str(L["thr"]),
+        "Reach": f"{int(L['reach'] * 100)}%",
+        "Tiers": len(L["thr"]),
+        "Coverage": f"{cov_L:.1f}%",
+        "Break-even cashback": f"{be_L * 100:.2f}%",
+        "Net @ 3% cashback": fmt_inr_signed(mb_L["net"]),
+    })
+df_be = pd.DataFrame(be_rows)
+
+styled_be = df_be.style.map(_net_color, subset=["Net @ 3% cashback"])
+st.dataframe(styled_be, hide_index=True, width="stretch")
+
+# Suggested operational pick at 3% cashback ----------------------------------
+suggested = REFERENCE_LADDERS[0]
+z_s = zone_counts(vd, N_BILLS, suggested["thr"], suggested["reach"])
+lf_s = expected_lift(z_s, response_rate, gap_aware)
+gifts_s = [0.03 * T for T in suggested["thr"]]
+mb_s = money_breakdown(lf_s, z_s, gifts_s, N_BILLS, MONTHS_IN_WINDOW, rgm_rate, kappa)
+cov_s = sum(lf_s["earned_per_tier"]) + sum(lf_s["free_per_tier"])
+roi_s = (mb_s["rgm"] - mb_s["burn"]) / mb_s["burn"] if mb_s["burn"] > 0 else 0.0
+bills_pm_s = int(round(cov_s / 100 * N_BILLS / MONTHS_IN_WINDOW))
+net_color = "#1B7A3F" if mb_s["net"] >= 0 else "#B11A1A"
+roi_color = "#1B7A3F" if roi_s >= 0 else "#B11A1A"
+
+st.subheader("Suggested operational pick")
+st.markdown(
+    f"""
+<div style='border-left:4px solid {HEADING}; background:#F2F6FA; padding:14px 18px; border-radius:4px; margin-top:0.4rem'>
+<div style='font-size:1.05rem; font-weight:600; color:{HEADING}; margin-bottom:8px'>
+At a <span style='font-family:monospace'>3% cashback</span> rate per tier — the most profitable balanced ladder
+</div>
+<div style='line-height:1.7; color:{TEXT_COLOR}'>
+<b>Ladder:</b> T = {suggested['thr']} &nbsp;·&nbsp; reach = {int(suggested['reach']*100)}% &nbsp;·&nbsp; {len(suggested['thr'])} tiers<br>
+<b>Coverage:</b> {cov_s:.1f}% (~{bills_pm_s:,} bills/month touched)<br>
+<b>Net /month:</b> <span style='color:{net_color}; font-weight:700'>{fmt_inr_signed(mb_s['net'])}</span>
+&nbsp;·&nbsp; <b>ROI:</b> <span style='color:{roi_color}; font-weight:700'>{roi_s*100:+.1f}%</span><br>
+<b>RGM /month:</b> {fmt_inr(mb_s['rgm'])} &nbsp;·&nbsp; <b>Burn /month:</b> {fmt_inr(mb_s['burn'])}
+</div>
+<div style='margin-top:10px; font-size:0.88rem; color:{MUTED}'>
+{suggested['tagline']}. All numbers update with your sidebar settings.
+</div>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+if st.button(
+    "Apply this ladder to the sidebar",
+    help=("Sets n_tiers, T sliders, and gift inputs to match the suggested ladder "
+          "(thresholds above with gift = 3% × T per tier)."),
+    type="primary",
+):
+    suggested_thr = suggested["thr"]
+    st.session_state["__pending_apply__"] = {
+        "n_tiers": len(suggested_thr),
+        "T_values": list(suggested_thr),
+        "gift_values": [round(0.03 * T) for T in suggested_thr],
+        "reach_pct": int(suggested["reach"] * 100),
+    }
+    st.rerun()
 
 st.divider()
 
