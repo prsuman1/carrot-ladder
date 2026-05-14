@@ -1,3 +1,5 @@
 chat_id,chat_created_at,chat_title,msg_index,msg_role,content_preview,message_json
 48b89dee30bb,2026-05-14T14:13:35Z,ping,0,user,ping,"{""role"": ""user"", ""content"": ""ping""}"
 48b89dee30bb,2026-05-14T14:13:35Z,ping,1,assistant,"Pong! I'm Carrot Bot, ready to help you analyze and design upsell ladders. How can I help you today?","{""role"": ""assistant"", ""content"": ""Pong! I'm Carrot Bot, ready to help you analyze and design upsell ladders. How can I help you today?""}"
+e5f51332f6d6,2026-05-14T14:14:40Z,Test suman this side,0,user,Test suman this side,"{""role"": ""user"", ""content"": ""Test suman this side ""}"
+e5f51332f6d6,2026-05-14T14:14:40Z,Test suman this side,1,assistant,"Hello Suman. I am Carrot Bot, the analytical assistant for Zeno.health's AOV Ladder Threshold project. How can I help you today?","{""role"": ""assistant"", ""content"": ""Hello Suman. I am Carrot Bot, the analytical assistant for Zeno.health's AOV Ladder Threshold project. How can I help you today?""}"
