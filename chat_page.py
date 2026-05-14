@@ -19,6 +19,8 @@ import streamlit as st
 
 from bot_prompt import SYSTEM_PROMPT
 from bot_tools import TOOL_SCHEMAS, dispatch
+from chat_store import is_configured as store_is_configured
+from chat_store import load_chats, save_chats
 
 # Try to load .env (local dev) — optional, fine if not present
 try:
@@ -74,11 +76,20 @@ def _new_chat_id() -> str:
 
 def _ensure_state() -> None:
     if "chats" not in st.session_state:
-        st.session_state["chats"] = {}
-    if "active_chat" not in st.session_state:
-        cid = _new_chat_id()
-        st.session_state["chats"][cid] = _blank_chat()
-        st.session_state["active_chat"] = cid
+        # First mount of this session: try to pull persisted chats from GitHub.
+        loaded = load_chats() if store_is_configured() else {}
+        st.session_state["chats"] = loaded
+    if "active_chat" not in st.session_state or st.session_state["active_chat"] not in st.session_state["chats"]:
+        if st.session_state["chats"]:
+            # Most recent by created_at
+            st.session_state["active_chat"] = max(
+                st.session_state["chats"].keys(),
+                key=lambda c: st.session_state["chats"][c].get("created_at", ""),
+            )
+        else:
+            cid = _new_chat_id()
+            st.session_state["chats"][cid] = _blank_chat()
+            st.session_state["active_chat"] = cid
 
 
 def _blank_chat() -> dict:
@@ -91,6 +102,20 @@ def _blank_chat() -> dict:
 
 def _active() -> dict:
     return st.session_state["chats"][st.session_state["active_chat"]]
+
+
+def _persist(silent: bool = True) -> None:
+    """Push the in-memory chats dict to GitHub. Silent on success, optional
+    toast on failure. No-op if persistence isn't configured."""
+    if not store_is_configured():
+        return
+    ok, err = save_chats(st.session_state.get("chats", {}))
+    if not ok and not silent:
+        # Show a brief, non-blocking toast. Keep chat working in-memory.
+        try:
+            st.toast(f"Chat save failed: {err}", icon="⚠")
+        except Exception:
+            pass
 
 
 def _set_title_from_first_user_msg() -> None:
@@ -244,11 +269,19 @@ def _render_sidebar() -> None:
             if st.button("Clear current chat", width="stretch"):
                 _active()["messages"] = [{"role": "system", "content": SYSTEM_PROMPT}]
                 _active()["title"] = "New chat"
+                _persist(silent=False)
                 st.rerun()
             if st.button("Delete all chats", width="stretch"):
-                st.session_state.pop("chats", None)
+                st.session_state["chats"] = {}
                 st.session_state.pop("active_chat", None)
+                _persist(silent=False)
                 st.rerun()
+
+        if not store_is_configured():
+            st.caption(
+                "Persistence disabled. Add `GITHUB_TOKEN` to Streamlit secrets "
+                "to save chats across sessions."
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +344,8 @@ def _render_chat() -> None:
             st.markdown(prompt)
         with st.chat_message("assistant"):
             st.write_stream(stream_assistant_turn())
+        # Persist the completed turn (user msg + assistant msg + any tool calls)
+        _persist(silent=False)
         st.rerun()
 
 
