@@ -38,3 +38,18 @@ def load_cdf_chart() -> pd.DataFrame:
 @st.cache_data
 def load_value_distribution() -> pd.DataFrame:
     return pd.read_parquet(DATA / "value_distribution.parquet")
+
+
+@st.cache_data
+def load_user_summary() -> pd.DataFrame:
+    return pd.read_parquet(DATA / "user_summary.parquet")
+
+
+@st.cache_data
+def load_user_topline() -> dict:
+    return json.loads((DATA / "user_topline.json").read_text())
+
+
+@st.cache_data
+def load_test_bills() -> pd.DataFrame:
+    return pd.read_parquet(DATA / "test_bills.parquet")

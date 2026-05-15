@@ -24,9 +24,13 @@ dashboard_page = st.Page(
     title="Dashboard",
     default=True,
 )
+personalized_page = st.Page(
+    "personalized_page.py",
+    title="Personalized Carrot",
+)
 chat_page = st.Page(
     "chat_page.py",
     title="AI Chat",
 )
 
-st.navigation([dashboard_page, chat_page]).run()
+st.navigation([dashboard_page, personalized_page, chat_page]).run()

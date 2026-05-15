@@ -1,0 +1,19 @@
+{
+  "n_users": 1565872,
+  "n_warm": 679373,
+  "n_light": 886499,
+  "n_training_bills": 12726210,
+  "n_test_bills_april": 539967,
+  "n_test_bills_may": 238755,
+  "n_excluded_new_patient": 106379,
+  "training_cutoff": "2026-04-01",
+  "test_window_april": [
+    "2026-04-01",
+    "2026-04-30"
+  ],
+  "test_window_may": [
+    "2026-05-01",
+    "2026-05-14"
+  ],
+  "generated_at": "2026-05-15T14:00:22Z"
+}
