@@ -481,7 +481,7 @@ def evaluate_personalized_config(
 
 # Search grids for find_best_personalized_config — kept small for latency
 _SEARCH_GRIDS = {
-    "prediction_method": ["Average", "P80", "P90", "P95", "Max"],
+    "prediction_method": ["Average", "P65", "P70", "P75", "P80", "P90", "P95", "Max"],
     "nudge_step": [0, 25, 50, 75, 100, 150, 200],
     "base_t1": [150, 200, 250, 300, 350],
     "base_t2": [400, 450, 550, 650, 750],
@@ -818,7 +818,7 @@ TOOL_SCHEMAS.extend([
                 "properties": {
                     "prediction_method": {
                         "type": "string",
-                        "enum": ["Average", "P80", "P90", "P95", "Max"],
+                        "enum": ["Average", "P65", "P70", "P75", "P80", "P90", "P95", "Max"],
                         "description": "Which per-user predicted-bill estimator to use.",
                     },
                     "base_T": {

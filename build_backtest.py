@@ -85,7 +85,10 @@ def build_training_summary(train_bills: pd.DataFrame) -> pd.DataFrame:
         max_v=("_bv", "max"),
         last_bill_date=("bill_date", "max"),
     )
-    print("  Computing p80 / p90 / p95 per user (slow step)...")
+    print("  Computing p65 / p70 / p75 / p80 / p90 / p95 per user (slow step)...")
+    agg["pred_p65"] = g["_bv"].quantile(0.65)
+    agg["pred_p70"] = g["_bv"].quantile(0.70)
+    agg["pred_p75"] = g["_bv"].quantile(0.75)
     agg["pred_p80"] = g["_bv"].quantile(0.80)
     agg["pred_p90"] = g["_bv"].quantile(0.90)
     agg["pred_p95"] = g["_bv"].quantile(0.95)
@@ -109,8 +112,10 @@ def build_training_summary(train_bills: pd.DataFrame) -> pd.DataFrame:
 
     return agg.reset_index()[[
         "patient_id", "bill_count",
-        "pred_avg", "pred_p80", "pred_p90", "pred_p95", "pred_max", "pred_trimmed",
-        "sd_full", "sd_trimmed",
+        "pred_avg",
+        "pred_p65", "pred_p70", "pred_p75",
+        "pred_p80", "pred_p90", "pred_p95", "pred_max",
+        "pred_trimmed", "sd_full", "sd_trimmed",
         "last_bill_date", "segment",
     ]]
 

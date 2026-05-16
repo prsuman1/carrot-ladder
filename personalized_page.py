@@ -28,6 +28,19 @@ from personalized_metrics import assign_threshold, build_slots, pred_column
 # ---------------------------------------------------------------------------
 TIER_COLORS = ["#FFEB84", "#F4D03F", "#E8B130", "#C99214", "#A87100"]
 EXCLUDED_COLOR = "#BFBFBF"
+
+# Gap-distance gradient: green = bill already crossed / very close; red = far from threshold.
+# Maps to gap buckets [crossed, ≤50, 50-100, 100-200, 200-400, >400].
+GAP_COLORS = ["#1B7A3F", "#8FBF8F", "#F4D03F", "#E8B130", "#D17A22", "#B11A1A"]
+GAP_LABELS = [
+    "Already crossed",
+    "Need ≤ ₹50 more",
+    "Need ₹50–100 more",
+    "Need ₹100–200 more",
+    "Need ₹200–400 more",
+    "Need ₹400+ more",
+]
+GAP_KEYS = ["crossed", "le_50", "50_100", "100_200", "200_400", "gt_400"]
 PLOTLY_TEMPLATE = "plotly_white"
 GRID_COLOR = "rgba(0,0,0,0.08)"
 TEXT_COLOR = "#222222"
@@ -128,11 +141,12 @@ with st.sidebar:
     st.subheader("Prediction method")
     pred_method = st.radio(
         "Per-user predicted bill",
-        options=["Average", "P80", "P90", "P95", "Max"],
-        index=1,
+        options=["Average", "P65", "P70", "P75", "P80", "P90", "P95", "Max"],
+        index=3,  # default = P75 (highest ±10% accuracy in our diagnostic)
         help=(
             "Average — mean of training bills.\n"
-            "P80 / P90 / P95 — value below which that % of training bills fall (higher = more conservative).\n"
+            "P65 / P70 / P75 / P80 / P90 / P95 — value below which that % of training bills fall "
+            "(higher = more conservative). P75 has the best ±10% accuracy on April bills.\n"
             "Max — highest training bill (most conservative; nearly zero auto-qualified)."
         ),
     )
@@ -172,7 +186,7 @@ with st.sidebar:
                                 "T2+ has no reach cutoff — every bill below threshold is "
                                 "in-reach (converts at the flat response rate)."))
     reach = reach_pct / 100.0
-    response_pct = st.slider("Response rate", min_value=0, max_value=100, value=40, step=1,
+    response_pct = st.slider("Response rate", min_value=0, max_value=100, value=10, step=1,
                              format="%d%%",
                              help="Of bills in-reach, what % top up to cross their threshold.")
     response_rate = response_pct / 100.0
@@ -203,6 +217,12 @@ if segment_choice.startswith("Warm only"):
 
 if pred_method == "Average":
     users["pred"] = users["pred_avg"]
+elif pred_method == "P65":
+    users["pred"] = users["pred_p65"]
+elif pred_method == "P70":
+    users["pred"] = users["pred_p70"]
+elif pred_method == "P75":
+    users["pred"] = users["pred_p75"]
 elif pred_method == "P80":
     users["pred"] = users["pred_p80"]
 elif pred_method == "P90":
@@ -227,7 +247,7 @@ users_assigned = users[users["base_idx"] >= 0]
 # Score April bills against the assigned thresholds
 # ---------------------------------------------------------------------------
 bills_scored = april_bills_full.merge(
-    users_assigned[["patient_id", "threshold", "cashback", "base_idx"]],
+    users_assigned[["patient_id", "pred", "threshold", "cashback", "base_idx"]],
     on="patient_id", how="inner",
 )
 
@@ -246,6 +266,12 @@ def score(df: pd.DataFrame, nudge_override: int | None = None,
             u_local = u_local[u_local["segment"] == "warm"]
         if pred_method == "Average":
             u_local["pred"] = u_local["pred_avg"]
+        elif pred_method == "P65":
+            u_local["pred"] = u_local["pred_p65"]
+        elif pred_method == "P70":
+            u_local["pred"] = u_local["pred_p70"]
+        elif pred_method == "P75":
+            u_local["pred"] = u_local["pred_p75"]
         elif pred_method == "P80":
             u_local["pred"] = u_local["pred_p80"]
         elif pred_method == "P90":
@@ -263,7 +289,7 @@ def score(df: pd.DataFrame, nudge_override: int | None = None,
                                        np.nan)
         u_local = u_local[u_local["base_idx"] >= 0]
         df = april_bills_full.merge(
-            u_local[["patient_id", "threshold", "cashback", "base_idx"]],
+            u_local[["patient_id", "pred", "threshold", "cashback", "base_idx"]],
             on="patient_id", how="inner",
         )
 
@@ -472,32 +498,33 @@ for k in range(K):
     pct_ir = n_ir / n_bills_k * 100
     pct_aut = n_aut / n_bills_k * 100
 
-    # Per-tier stacked bar — T1 has 3 segments (unreachable / in-reach / auto),
-    # T2+ has 2 segments (in-reach / auto). The score function already enforces
-    # that n_unr == 0 for T2+.
+    # Gap-density bar: 6 segments by ₹-gap from threshold (green → red).
+    # Computed inline from the per-tier slice of bills_scored.
+    sub_k = bills_scored[bills_scored["base_idx"] == k]
+    B_k = sub_k["bill_value_net"].to_numpy(dtype=float)
+    V_k = sub_k["threshold"].to_numpy(dtype=float)
+    gap_k = V_k - B_k
+    bucket_counts = [
+        int((B_k >= V_k).sum()),                       # crossed
+        int(((gap_k > 0) & (gap_k <= 50)).sum()),       # le_50
+        int(((gap_k > 50) & (gap_k <= 100)).sum()),     # 50_100
+        int(((gap_k > 100) & (gap_k <= 200)).sum()),    # 100_200
+        int(((gap_k > 200) & (gap_k <= 400)).sum()),    # 200_400
+        int((gap_k > 400).sum()),                       # gt_400
+    ]
     fig_t = go.Figure()
-    if k == 0 and n_unr > 0:
+    for bi, count in enumerate(bucket_counts):
+        if count == 0:
+            continue
+        pct = count / n_bills_k * 100
         fig_t.add_trace(go.Bar(
-            x=[n_unr], y=[""], orientation="h",
-            marker=dict(color=COLOR_UNREACH, line=dict(width=0)),
-            text=f"Unreachable<br>{n_unr:,} ({pct_unr:.1f}%)",
+            x=[count], y=[""], orientation="h",
+            marker=dict(color=GAP_COLORS[bi], line=dict(width=0)),
+            text=f"{GAP_LABELS[bi]}<br>{count:,} ({pct:.1f}%)",
             textposition="inside", insidetextanchor="middle",
-            hoverinfo="skip", showlegend=False,
+            hovertemplate=f"{GAP_LABELS[bi]}<br>{count:,} bills ({pct:.1f}%)<extra></extra>",
+            showlegend=False,
         ))
-    fig_t.add_trace(go.Bar(
-        x=[n_ir], y=[""], orientation="h",
-        marker=dict(color=COLOR_INREACH, line=dict(width=0)),
-        text=f"In-reach<br>{n_ir:,} ({pct_ir:.1f}%)<br>→ nudged {nudged_k:,.0f}",
-        textposition="inside", insidetextanchor="middle",
-        hoverinfo="skip", showlegend=False,
-    ))
-    fig_t.add_trace(go.Bar(
-        x=[n_aut], y=[""], orientation="h",
-        marker=dict(color=COLOR_AUTO, line=dict(width=0)),
-        text=f"Auto-qualified<br>{n_aut:,} ({pct_aut:.1f}%)",
-        textposition="inside", insidetextanchor="middle",
-        hoverinfo="skip", showlegend=False,
-    ))
     fig_t.update_layout(
         template=PLOTLY_TEMPLATE, barmode="stack", height=110,
         margin=dict(l=10, r=10, t=10, b=10),
@@ -532,6 +559,114 @@ for k in range(K):
                    help="Bills already past threshold without any nudge.")
     cols[2].metric("Revenue", fmt_inr(rev_k))
     cols[3].metric("Burn", fmt_inr(burn_k))
+
+    # Predicted vs. actual scatter — shows prediction accuracy + reachability.
+    if len(sub_k) > 0:
+        sample_k = sub_k.sample(min(2000, len(sub_k)), random_state=42)
+        gap_s = sample_k["threshold"].to_numpy(float) - sample_k["bill_value_net"].to_numpy(float)
+        bs = sample_k["bill_value_net"].to_numpy(float)
+        vs = sample_k["threshold"].to_numpy(float)
+        color_idx = np.where(bs >= vs, 0,
+                     np.where(gap_s <= 50, 1,
+                     np.where(gap_s <= 100, 2,
+                     np.where(gap_s <= 200, 3,
+                     np.where(gap_s <= 400, 4, 5)))))
+        colors = [GAP_COLORS[int(i)] for i in color_idx]
+
+        # Per-tier auto-zoom: x = cohort's actual pred range with small pad.
+        # No widening for narrow cohorts — narrow data should fill the chart,
+        # not float in empty space. Jitter (below) gives narrow cohorts their
+        # spread within the tight axis.
+        pred_arr = sample_k["pred"].to_numpy(float)
+        x_lo = float(np.percentile(pred_arr, 1))
+        x_hi = float(np.percentile(pred_arr, 99))
+        x_pad = max((x_hi - x_lo) * 0.08, 2.0)
+        x_min, x_max = max(0, x_lo - x_pad), x_hi + x_pad
+
+        y_hi = float(np.percentile(bs, 95))
+        y_max = max(y_hi * 1.15, float(vs.max()) * 1.5)
+
+        # X-jitter only when the cohort's pred range is narrow (T2/T3); for
+        # wide ranges (T1) jitter would misleadingly push dots past tier
+        # boundaries. Clamp jittered values to the cohort's actual range.
+        pred_actual_min = float(pred_arr.min())
+        pred_actual_max = float(pred_arr.max())
+        if pred_actual_max - pred_actual_min < 150:
+            jitter_width = max((pred_actual_max - pred_actual_min) * 0.15, 4.0)
+            rng = np.random.default_rng(42)
+            pred_jit = np.clip(
+                pred_arr + rng.normal(0, jitter_width, size=len(pred_arr)),
+                pred_actual_min, pred_actual_max,
+            )
+        else:
+            jitter_width = 0.0
+            pred_jit = pred_arr
+
+        fig_sc = go.Figure()
+        # Diagonal y=x — "perfect prediction" reference
+        fig_sc.add_trace(go.Scatter(
+            x=[0, y_max], y=[0, y_max], mode="lines",
+            line=dict(color="rgba(0,0,0,0.25)", width=1, dash="dot"),
+            name="actual = predicted", hoverinfo="skip", showlegend=False,
+        ))
+        # Median threshold reference line
+        median_thr = float(np.median(vs))
+        fig_sc.add_hline(
+            y=median_thr,
+            line=dict(color="black", width=1.4, dash="dash"),
+            annotation_text=f"threshold ≈ ₹{median_thr:.0f}",
+            annotation_position="top right",
+        )
+
+        # One trace per gap bucket — gives a real legend and lets the user
+        # toggle buckets on/off via the plotly legend. Hover shows the ORIGINAL
+        # (un-jittered) predicted value so jitter never lies in the tooltip.
+        for bi, label in enumerate(GAP_LABELS):
+            mask = color_idx == bi
+            if not mask.any():
+                continue
+            fig_sc.add_trace(go.Scatter(
+                x=pred_jit[mask], y=bs[mask], mode="markers",
+                marker=dict(color=GAP_COLORS[bi], opacity=0.55, size=6,
+                            line=dict(width=0)),
+                name=f"{label} ({int(mask.sum()):,})",
+                customdata=np.column_stack([
+                    pred_arr[mask],   # 0 — true predicted
+                    vs[mask],         # 1 — threshold
+                    gap_s[mask],      # 2 — gap
+                ]),
+                hovertemplate=(
+                    "predicted ₹%{customdata[0]:.0f}<br>"
+                    "actual ₹%{y:.0f}<br>"
+                    "threshold ₹%{customdata[1]:.0f}<br>"
+                    "gap ₹%{customdata[2]:.0f}<extra></extra>"
+                ),
+                showlegend=True,
+            ))
+
+        fig_sc.update_layout(
+            template=PLOTLY_TEMPLATE, height=380,
+            margin=dict(l=10, r=10, t=40, b=80),
+            xaxis_title="Predicted bill ₹", yaxis_title="Actual April bill ₹",
+            xaxis=dict(range=[x_min, x_max], showgrid=True, gridcolor=GRID_COLOR),
+            yaxis=dict(range=[0, y_max], showgrid=True, gridcolor=GRID_COLOR),
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            font=dict(color=TEXT_COLOR),
+            legend=dict(
+                orientation="h", yanchor="top", y=-0.18,
+                xanchor="center", x=0.5,
+                font=dict(size=10),
+            ),
+        )
+        st.plotly_chart(fig_sc, width="stretch")
+        jitter_note = (f"jittered ±₹{jitter_width:.0f} on X to avoid stacking"
+                       if jitter_width > 0 else "no X jitter (wide pred range)")
+        st.caption(
+            f"Each dot = one April bill (sampled to {len(sample_k):,}, {jitter_note}). "
+            f"Above the dashed line = already crossed threshold. "
+            f"Click bucket names in the legend to toggle visibility. "
+            f"Off the diagonal = prediction was inaccurate for that user."
+        )
 
 st.divider()
 
@@ -585,6 +720,12 @@ def score_for_method(method: str) -> dict:
         u_local = u_local[u_local["segment"] == "warm"]
     if method == "Average":
         u_local["pred"] = u_local["pred_avg"]
+    elif method == "P65":
+        u_local["pred"] = u_local["pred_p65"]
+    elif method == "P70":
+        u_local["pred"] = u_local["pred_p70"]
+    elif method == "P75":
+        u_local["pred"] = u_local["pred_p75"]
     elif method == "P80":
         u_local["pred"] = u_local["pred_p80"]
     elif method == "P90":
@@ -621,7 +762,7 @@ def _net_color_fn(val: str) -> str:
 
 
 mc_rows = []
-for m in ["Average", "P80", "P90", "P95", "Max"]:
+for m in ["Average", "P65", "P70", "P75", "P80", "P90", "P95", "Max"]:
     r = score_for_method(m)
     mc_rows.append({
         "Method": ("**" + m + "**") if m == pred_method else m,

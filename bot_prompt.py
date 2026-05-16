@@ -60,7 +60,7 @@ which page the user is asking about.
   New patients (first-ever bill in test window) are excluded — they have a
   separate program. May 1-14 was pulled but is not used.
 - **Tier assignment.** Predicted next bill (per the user's chosen method:
-  Average / P80 / P90 / P95 / Max) maps to the smallest "slot value" strictly
+  Average / P65 / P70 / P75 / P80 / P90 / P95 / Max) maps to the smallest "slot value" strictly
   greater. Slots = base tiers plus nudge-step increments between consecutive
   tiers (e.g. base [250, 450] + nudge 50 → slots {250, 300, 350, 400, 450}).
   The cashback rate comes from the base tier whose slot range contained that
@@ -78,6 +78,26 @@ which page the user is asking about.
 - **Primary KPI: Net = RGM − Burn.** Secondary KPI: **Cashback rate %** =
   (Nudged + Auto-qualified) / total bills. Replaces the old "Coverage" metric
   because T2+ has no unreachable bucket, so coverage trivially approaches 100%.
+
+# Personalized Carrot — visuals on the per-tier card
+Each tier card shows two visuals you should be able to describe:
+
+1. **Gap-density bar** (6 colored segments, green → red): how April bills
+   distribute across "how much more they'd need to spend to cross threshold".
+   Segments: Already crossed (dark green), ≤₹50 more, ₹50–100, ₹100–200,
+   ₹200–400, ₹400+ (dark red). Wide green = bills cluster near threshold
+   (program works). Wide red = bills sit far from threshold (program is
+   asking for unrealistic top-ups). Bucket counts are in
+   `per_tier[k]["gap_buckets"]` keys: `crossed`, `le_50`, `50_100`,
+   `100_200`, `200_400`, `gt_400`.
+2. **Predicted-vs-actual scatter** (one dot per sampled April bill): x = our
+   predicted bill for that user, y = actual April bill, diagonal dashed line
+   = perfect prediction, horizontal dashed line = the user's threshold.
+   Dots above the horizontal line = auto-qualified. Dots near the horizontal
+   line = nudgeable. Dots far below = big gap. Dots off the diagonal = our
+   prediction was wrong for that user. Useful for diagnosing prediction
+   accuracy — Max-method scatters show most dots far below the horizontal
+   line because max-as-prediction sits above typical bills.
 
 # Tools you can call
 

@@ -21,16 +21,19 @@ DEFAULT_CASHBACK = [10, 20, 40, 80, 120]
 DEFAULT_N_TIERS = 3
 DEFAULT_NUDGE_STEP = 50
 DEFAULT_REACH_PCT = 75
-DEFAULT_RESPONSE_PCT = 40
+DEFAULT_RESPONSE_PCT = 10
 DEFAULT_REDEMPTION_PCT = 70
 DEFAULT_OVERSHOOT_PCT = 30
 DEFAULT_MARGIN_PCT = 36
-DEFAULT_PREDICTION_METHOD = "P80"
+DEFAULT_PREDICTION_METHOD = "P75"
 DEFAULT_SEGMENT = "warm_light"  # or "warm_only"
 DEFAULT_CAP_BILLS = 500
 
 PRED_METHOD_TO_COL = {
     "Average": "pred_avg",
+    "P65": "pred_p65",
+    "P70": "pred_p70",
+    "P75": "pred_p75",
     "P80": "pred_p80",
     "P90": "pred_p90",
     "P95": "pred_p95",
@@ -224,6 +227,8 @@ def score_config(
                 "unreachable": 0, "in_reach": 0, "auto_qualified": 0,
                 "nudged_expected": 0.0, "revenue": 0.0, "rgm": 0.0,
                 "burn": 0.0, "net": 0.0,
+                "gap_buckets": {"crossed": 0, "le_50": 0, "50_100": 0,
+                                "100_200": 0, "200_400": 0, "gt_400": 0},
             })
             continue
         n_unr_k = int(unreach[mk].sum())
@@ -234,6 +239,16 @@ def score_config(
         rev_k = float((pc[m_nudged] * gap[m_nudged] * kappa).sum())
         burn_k = (n_aut_k + nudged_k) * cashback_per_tier[k] * redemption_rate
         rgm_k = rev_k * rgm_rate
+
+        # Gap-distance buckets — "how far below threshold did each bill land?"
+        gap_buckets = {
+            "crossed":  int(((B >= V) & mk).sum()),
+            "le_50":    int(((gap > 0) & (gap <= 50) & mk).sum()),
+            "50_100":   int(((gap > 50) & (gap <= 100) & mk).sum()),
+            "100_200":  int(((gap > 100) & (gap <= 200) & mk).sum()),
+            "200_400":  int(((gap > 200) & (gap <= 400) & mk).sum()),
+            "gt_400":   int(((gap > 400) & mk).sum()),
+        }
 
         per_tier.append({
             "tier": k + 1,
@@ -249,6 +264,7 @@ def score_config(
             "rgm": round(rgm_k, 2),
             "burn": round(burn_k, 2),
             "net": round(rgm_k - burn_k, 2),
+            "gap_buckets": gap_buckets,
         })
         total_revenue += rev_k
         total_burn += burn_k
