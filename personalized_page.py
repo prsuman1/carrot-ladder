@@ -21,7 +21,13 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from data_loader import load_test_bills, load_user_summary, load_user_topline
-from personalized_metrics import assign_threshold, build_slots, pred_column
+from personalized_metrics import (
+    BUCKET_EDGES,
+    BUCKET_KEYS_5,
+    assign_threshold,
+    build_slots,
+    pred_column,
+)
 
 # ---------------------------------------------------------------------------
 # Styling
@@ -186,10 +192,22 @@ with st.sidebar:
                                 "T2+ has no reach cutoff — every bill below threshold is "
                                 "in-reach (converts at the flat response rate)."))
     reach = reach_pct / 100.0
-    response_pct = st.slider("Response rate", min_value=0, max_value=100, value=10, step=1,
-                             format="%d%%",
-                             help="Of bills in-reach, what % top up to cross their threshold.")
+    response_pct = st.slider(
+        "Default response rate (per bucket)",
+        min_value=0, max_value=100, value=10, step=1, format="%d%%",
+        help=(
+            "Pre-fills every gap-bucket input under each tier with this value. "
+            "Click 'Reset all bucket rates' below to wipe per-bucket overrides "
+            "back to this default."
+        ),
+    )
     response_rate = response_pct / 100.0
+    if st.button("↻ Reset all bucket rates", use_container_width=True,
+                 help="Clear every per-bucket override and snap them back to the default above."):
+        for k in list(st.session_state.keys()):
+            if k.startswith("resp_t") and "_b" in k:
+                del st.session_state[k]
+        st.rerun()
     redemption_pct = st.slider("Redemption rate", min_value=0, max_value=100, value=70, step=5,
                                format="%d%%",
                                help="Of cashback issued, what % gets redeemed (= real burn).")
@@ -253,10 +271,14 @@ bills_scored = april_bills_full.merge(
 
 
 def score(df: pd.DataFrame, nudge_override: int | None = None,
-          base_T_override: list[int] | None = None) -> dict:
+          base_T_override: list[int] | None = None,
+          bucket_rates: dict | None = None) -> dict:
     """Score actual bills against each user's single assigned threshold.
 
-    If overrides given, re-assign thresholds first (used by nudge-sensitivity sweep)."""
+    If overrides given, re-assign thresholds first (used by nudge-sensitivity sweep).
+    `bucket_rates` (optional): {tier_idx: {bucket_key: pct}}. Missing → use default
+    response_rate. None → use flat response_rate everywhere (legacy behaviour).
+    """
     if nudge_override is not None or base_T_override is not None:
         # Re-assign thresholds for the sweep
         bT = base_T_override if base_T_override is not None else base_T
@@ -317,8 +339,17 @@ def score(df: pd.DataFrame, nudge_override: int | None = None,
     unreach = is_t1 & (B < reach * V)
     inreach = (~auto) & (~unreach)
     gap = V - B
-    gap_factor = np.where(inreach, 1.0, 0.0)  # flat (gap-aware scaling removed)
-    p_convert = response_rate * gap_factor  # only nonzero for in-reach
+
+    # Per-bill bucket index (0..4) + per-tier-per-bucket rate matrix.
+    bucket_idx = np.clip(np.searchsorted(BUCKET_EDGES, gap, side="left"), 0, 4)
+    rate_matrix = np.full((K, 5), response_rate, dtype=float)
+    if bucket_rates:
+        for tk_idx in range(K):
+            tier_overrides = bucket_rates.get(tk_idx + 1, {})
+            for bi, bkey in enumerate(BUCKET_KEYS_5):
+                if bkey in tier_overrides:
+                    rate_matrix[tk_idx, bi] = float(tier_overrides[bkey]) / 100.0
+    p_convert = np.where(inreach, rate_matrix[BI, bucket_idx], 0.0)
 
     n_unreach = int(unreach.sum())
     n_inreach = int(inreach.sum())
@@ -377,7 +408,23 @@ def score(df: pd.DataFrame, nudge_override: int | None = None,
     }
 
 
-res = score(bills_scored)
+# Pre-seed per-bucket response-rate session state keys with the current
+# global default (only if untouched). Then assemble the bucket_rates dict
+# that score() will use for THIS render. Inputs themselves are rendered
+# inline inside each per-tier card further below.
+K_now = len(base_T)
+for tk in range(K_now):
+    for bkey in BUCKET_KEYS_5:
+        skey = f"resp_t{tk+1}_b{bkey}"
+        if skey not in st.session_state:
+            st.session_state[skey] = int(response_pct)
+bucket_rates = {
+    tk + 1: {bkey: int(st.session_state[f"resp_t{tk+1}_b{bkey}"])
+             for bkey in BUCKET_KEYS_5}
+    for tk in range(K_now)
+}
+
+res = score(bills_scored, bucket_rates=bucket_rates)
 total_nudged = float(res["nudged_pt"].sum())
 total_auto = float(res["auto_pt"].sum())
 
@@ -551,6 +598,41 @@ for k in range(K):
         unsafe_allow_html=True,
     )
     st.plotly_chart(fig_t, width="stretch")
+
+    # ----- Per-bucket response-rate inputs -----
+    # Compact 5-column row, one number_input per nudgeable bucket. Bucket
+    # name labels match the gradient colour for visual association with
+    # the bar above. Disabled when a bucket has zero bills.
+    st.markdown(
+        f"<div style='font-size:0.78rem;color:{MUTED};margin:6px 0 -4px 2px'>"
+        f"Conversion rate per gap bucket — bills not crossed earn cashback only if they top up"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    bucket_cols = st.columns(5, gap="small")
+    bucket_counts_5 = bucket_counts[1:]  # drop "Already crossed" (index 0)
+    for bi, (col, count) in enumerate(zip(bucket_cols, bucket_counts_5)):
+        bkey = BUCKET_KEYS_5[bi]
+        skey = f"resp_t{k+1}_b{bkey}"
+        label_html = (
+            f"<div style='font-size:0.75rem;color:{GAP_COLORS[bi+1]};"
+            f"font-weight:600;margin-bottom:-6px'>{GAP_LABELS[bi+1]}</div>"
+        )
+        with col:
+            st.markdown(label_html, unsafe_allow_html=True)
+            cur = int(st.session_state.get(skey, int(response_pct)))
+            modified = (cur != int(response_pct))
+            disabled = (count == 0)
+            st.number_input(
+                label=" ", label_visibility="collapsed",
+                min_value=0, max_value=100, step=1,
+                key=skey, format="%d", disabled=disabled,
+                help=(f"% of bills in bucket '{GAP_LABELS[bi+1]}' that top up to threshold. "
+                      f"Default {int(response_pct)}%."),
+            )
+            cap = f"{count:,} bills" if count > 0 else "(no bills)"
+            badge = "  •" if modified and not disabled else ""
+            st.caption(f"{cap}{badge}")
 
     cols = st.columns(4)
     cols[0].metric("Nudged conversions", f"{nudged_k:,.0f}",
@@ -747,7 +829,7 @@ def score_for_method(method: str) -> dict:
         u_assigned[["patient_id", "threshold", "cashback", "base_idx"]],
         on="patient_id", how="inner",
     )
-    r = score(bs)
+    r = score(bs, bucket_rates=bucket_rates)
     r["excluded_users"] = excl
     r["assigned_users"] = len(u_assigned)
     return r
@@ -788,7 +870,7 @@ st.caption("Sweep nudge ₹ from 0 to 200 holding all other settings constant.")
 nudge_grid = list(range(0, 201, 20))
 net_curve, cb_curve, rgm_curve, burn_curve = [], [], [], []
 for nd in nudge_grid:
-    r_nd = score(bills_scored, nudge_override=nd)
+    r_nd = score(bills_scored, nudge_override=nd, bucket_rates=bucket_rates)
     net_curve.append(r_nd["net"])
     cb_curve.append(r_nd["cashback_rate_pct"])
     rgm_curve.append(r_nd["rgm"])

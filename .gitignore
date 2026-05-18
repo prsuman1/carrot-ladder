@@ -7,3 +7,4 @@ venv/
 .DS_Store
 .claude/
 data/bills_monthly/
+prediction_lab/

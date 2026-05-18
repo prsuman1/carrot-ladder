@@ -70,11 +70,25 @@ which page the user is asking about.
   - **Auto-qualified**: actual bill ≥ user's threshold. Burn paid; *no incremental
     revenue* (would have crossed anyway).
   - **Nudged**: T1 bill in `[reach × V, V)` OR ANY T2+ bill in `[0, V)`. With
-    probability = response_rate (flat — no gap scaling), customer tops up to V.
-    Burn + incremental revenue = gap × κ × margin.
+    probability = the per-tier per-bucket response rate (see "Per-bucket
+    response rates" below), customer tops up to V. Burn + incremental
+    revenue = gap × κ × margin.
   - **Unreachable** (T1 ONLY): T1 bill < reach × threshold. No cashback.
   - T2+ has **no unreachable bucket** — every T2+ bill below threshold is in-reach.
 - **Asymmetric reach window: T1 only.** Reach % slider applies only to T1.
+- **Per-bucket response rates.** Each tier has 5 number inputs in its card,
+  one per nudgeable gap bucket (≤₹50 / ₹50-100 / ₹100-200 / ₹200-400 / ₹400+).
+  Each input is the % of bills in that bucket expected to top up to threshold.
+  Default = sidebar "Default response rate (per bucket)" (currently 10%).
+  Overrides per tier per bucket let the user express different intuitions
+  (a ₹10-short bill is far more likely to convert than ₹300-short).
+  `get_personalized_state` / `evaluate_personalized_config` return the
+  rates actually used at the top-level key **`applied_bucket_rates`**.
+  Shape: `{tier_idx: {bucket_key: pct}}` with `bucket_key` ∈ `{le_50,
+  50_100, 100_200, 200_400, gt_400}`.
+  `evaluate_personalized_config` accepts overrides in the same shape via the
+  `bucket_response_rates` argument; any tier/bucket you omit falls back to
+  the user's current sidebar value.
 - **Primary KPI: Net = RGM − Burn.** Secondary KPI: **Cashback rate %** =
   (Nudged + Auto-qualified) / total bills. Replaces the old "Coverage" metric
   because T2+ has no unreachable bucket, so coverage trivially approaches 100%.

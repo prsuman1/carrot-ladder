@@ -405,6 +405,19 @@ def _personalized_current_settings_from_session() -> Dict[str, Any]:
     segment_label = ss.get("Include", "Warm + Light (≥1 bill)")
     segment = "warm_only" if segment_label.startswith("Warm only") else "warm_light"
 
+    response_pct = int(ss.get("Default response rate (per bucket)",
+                              ss.get("Response rate", DEFAULT_RESPONSE_PCT)))
+
+    # Per-bucket response rates from session_state, falling back to the global
+    # default. 5 buckets per tier (the 5 nudgeable gap categories).
+    bucket_keys = ["le_50", "50_100", "100_200", "200_400", "gt_400"]
+    bucket_response_rates: Dict[int, Dict[str, int]] = {}
+    for t_idx in range(1, n_tiers + 1):
+        bucket_response_rates[t_idx] = {
+            bkey: int(ss.get(f"resp_t{t_idx}_b{bkey}", response_pct))
+            for bkey in bucket_keys
+        }
+
     return {
         "segment": segment,
         "cap_bills": int(ss.get("Cap bill_count at", DEFAULT_CAP_BILLS)),
@@ -413,10 +426,11 @@ def _personalized_current_settings_from_session() -> Dict[str, Any]:
         "cashback_per_tier": cashback_per_tier,
         "nudge_step": int(ss.get("Nudge step ₹", DEFAULT_NUDGE_STEP)),
         "reach_pct": int(ss.get("Reach window (T1 only)", DEFAULT_REACH_PCT)),
-        "response_pct": int(ss.get("Response rate", DEFAULT_RESPONSE_PCT)),
+        "response_pct": response_pct,
         "redemption_pct": int(ss.get("Redemption rate", DEFAULT_REDEMPTION_PCT)),
         "overshoot_pct": int(ss.get("Revenue overshoot κ", DEFAULT_OVERSHOOT_PCT)),
         "margin_pct": int(ss.get("Gross margin", DEFAULT_MARGIN_PCT)),
+        "bucket_response_rates": bucket_response_rates,
     }
 
 
@@ -450,15 +464,32 @@ def evaluate_personalized_config(
     margin_pct: int = None,
     segment: str = None,
     cap_bills: int = None,
+    bucket_response_rates: Dict[int, Dict[str, float]] = None,
 ) -> Dict[str, Any]:
     """Score a hypothetical config without touching the user's sidebar.
 
     Any argument omitted falls back to the CURRENT session state (or page
     default if the user hasn't visited the page). Use this for 'what if'
     explorations like 'what if I switched to P95 and raised T1 to 300?'.
+
+    `bucket_response_rates` overrides the per-tier per-bucket conversion rates.
+    Shape: {tier_idx: {bucket_key: pct}} where bucket_key is one of
+    le_50 / 50_100 / 100_200 / 200_400 / gt_400. Missing entries fall back
+    to the current sidebar value for that bucket.
     """
     users, april, _ = _personalized_data()
     current = _personalized_current_settings_from_session()
+
+    # Merge per-bucket override into current state's per-bucket rates
+    merged_bucket_rates = dict(current.get("bucket_response_rates", {}))
+    if bucket_response_rates:
+        for tier_idx, bucket_dict in bucket_response_rates.items():
+            tier_idx = int(tier_idx)
+            base = dict(merged_bucket_rates.get(tier_idx, {}))
+            for bkey, rate in bucket_dict.items():
+                base[bkey] = float(rate)
+            merged_bucket_rates[tier_idx] = base
+
     settings = {
         "prediction_method": prediction_method or current["prediction_method"],
         "base_T": list(base_T) if base_T is not None else current["base_T"],
@@ -471,6 +502,7 @@ def evaluate_personalized_config(
         "margin_pct": margin_pct if margin_pct is not None else current["margin_pct"],
         "segment": segment or current["segment"],
         "cap_bills": cap_bills if cap_bills is not None else current["cap_bills"],
+        "bucket_response_rates": merged_bucket_rates,
     }
     # If base_T changed but cashback list wasn't passed, repad cashback list to match length
     if len(settings["cashback_per_tier"]) != len(settings["base_T"]):
@@ -559,6 +591,7 @@ def find_best_personalized_config(
             "margin_pct": current["margin_pct"],
             "segment": current["segment"],
             "cap_bills": current["cap_bills"],
+            "bucket_response_rates": current.get("bucket_response_rates"),
         }
         # Apply fixed overrides first
         for k, v in fixed.items():
@@ -847,6 +880,16 @@ TOOL_SCHEMAS.extend([
                                 "description": "Filter: only warm users (≥3 bills) or warm+light (≥1)."},
                     "cap_bills": {"type": "integer", "minimum": 10, "maximum": 10000,
                                   "description": "Drop synthetic walk-in accounts above this bill count."},
+                    "bucket_response_rates": {
+                        "type": "object",
+                        "description": (
+                            "Per-tier per-bucket conversion overrides. Shape: "
+                            "{tier_idx (1-based): {bucket_key: pct}} where bucket_key is one of "
+                            "'le_50', '50_100', '100_200', '200_400', 'gt_400'. "
+                            "Any missing tier/bucket falls back to the user's current sidebar value. "
+                            "Use to explore 'what if T2 le_50 converts at 40% but T2 gt_400 at 1%?'."
+                        ),
+                    },
                 },
                 "required": [],
             },

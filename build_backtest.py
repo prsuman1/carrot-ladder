@@ -74,16 +74,13 @@ def build_training_summary(train_bills: pd.DataFrame) -> pd.DataFrame:
     Light = 1 or 2 training bills; warm = >= 3.
     """
     bv = train_bills["bill_value_net"].astype(float)
-    train_bills = train_bills.assign(_bv=bv, _bv2=bv * bv)
+    train_bills = train_bills.assign(_bv=bv)
 
     g = train_bills.groupby("patient_id", sort=False)
     agg = g.agg(
         bill_count=("_bv", "size"),
         sum_v=("_bv", "sum"),
-        sumsq_v=("_bv2", "sum"),
-        min_v=("_bv", "min"),
         max_v=("_bv", "max"),
-        last_bill_date=("bill_date", "max"),
     )
     print("  Computing p65 / p70 / p75 / p80 / p90 / p95 per user (slow step)...")
     agg["pred_p65"] = g["_bv"].quantile(0.65)
@@ -92,32 +89,26 @@ def build_training_summary(train_bills: pd.DataFrame) -> pd.DataFrame:
     agg["pred_p80"] = g["_bv"].quantile(0.80)
     agg["pred_p90"] = g["_bv"].quantile(0.90)
     agg["pred_p95"] = g["_bv"].quantile(0.95)
-    agg["pred_max"] = agg["max_v"]  # already computed above
-
-    n = agg["bill_count"].astype(float)
-    agg["pred_avg"] = agg["sum_v"] / n
-    var_full = (agg["sumsq_v"] / n) - agg["pred_avg"] ** 2
-    agg["sd_full"] = np.sqrt(var_full.clip(lower=0))
-
-    trim_n = (n - 2).replace(0, np.nan)
-    trim_sum = agg["sum_v"] - agg["min_v"] - agg["max_v"]
-    trim_sumsq = agg["sumsq_v"] - agg["min_v"] ** 2 - agg["max_v"] ** 2
-    pred_trimmed = np.where(n >= 4, trim_sum / trim_n, np.nan)
-    trim_var = np.where(n >= 4, (trim_sumsq / trim_n) - pred_trimmed ** 2, np.nan)
-    agg["pred_trimmed"] = pred_trimmed
-    agg["sd_trimmed"] = np.sqrt(np.clip(trim_var, a_min=0, a_max=None))
+    agg["pred_max"] = agg["max_v"]
+    agg["pred_avg"] = agg["sum_v"] / agg["bill_count"].astype(float)
 
     agg = agg[agg["bill_count"] >= 1].copy()
     agg["segment"] = np.where(agg["bill_count"] >= 3, "warm", "light")
 
-    return agg.reset_index()[[
+    out = agg.reset_index()[[
         "patient_id", "bill_count",
         "pred_avg",
         "pred_p65", "pred_p70", "pred_p75",
         "pred_p80", "pred_p90", "pred_p95", "pred_max",
-        "pred_trimmed", "sd_full", "sd_trimmed",
-        "last_bill_date", "segment",
+        "segment",
     ]]
+    # Shrink parquet for deployment: downcast prediction columns to float32
+    # (halves storage; predicted bills don't need ₹0.0001 precision).
+    pred_cols = [c for c in out.columns if c.startswith("pred_")]
+    out[pred_cols] = out[pred_cols].astype(np.float32)
+    out["bill_count"] = out["bill_count"].astype(np.int32)
+    out["patient_id"] = out["patient_id"].astype(np.int64)
+    return out
 
 
 def main() -> None:

@@ -40,6 +40,11 @@ PRED_METHOD_TO_COL = {
     "Max": "pred_max",
 }
 
+# 5 nudgeable gap buckets in fixed order. Matches the gap_buckets dict shape
+# returned by score_config. Index 0 = ≤₹50 from threshold, … index 4 = ₹400+ from threshold.
+BUCKET_KEYS_5 = ["le_50", "50_100", "100_200", "200_400", "gt_400"]
+BUCKET_EDGES = [50.0, 100.0, 200.0, 400.0]  # used by np.searchsorted to bucket gaps
+
 
 def build_slots(base_T: List[int], nudge: int) -> Tuple[np.ndarray, np.ndarray]:
     """Sorted slot array + parallel base-tier-index array.
@@ -122,12 +127,19 @@ def score_config(
     redemption_pct: int = DEFAULT_REDEMPTION_PCT,
     overshoot_pct: int = DEFAULT_OVERSHOOT_PCT,
     margin_pct: int = DEFAULT_MARGIN_PCT,
+    bucket_response_rates: Dict[int, Dict[str, float]] = None,
 ) -> Dict[str, Any]:
     """Full pipeline: filter users → pick prediction → assign threshold →
     score actual April bills → aggregate. Returns a JSON-friendly dict.
 
     Implements the asymmetric reach window: T1 (base_idx==0) keeps the
     reach-% cutoff; T2+ has no unreachable bucket.
+
+    `bucket_response_rates` (optional): per-tier per-bucket conversion rate.
+    Shape: {tier_idx (1-based): {bucket_key: rate_in_percent}} where
+    bucket_key is one of BUCKET_KEYS_5. Any missing tier/bucket falls back
+    to `response_pct` (the global default). Pass None to keep the legacy
+    flat-rate behaviour (everyone in-reach uses `response_pct`).
     """
     if base_T is None:
         base_T = list(DEFAULT_BASE_T[:DEFAULT_N_TIERS])
@@ -193,6 +205,8 @@ def score_config(
                        "n_unreach": 0, "n_inreach": 0, "n_auto": 0,
                        "nudged_total": 0.0},
             "per_tier": empty_per_tier,
+            "applied_bucket_rates": {tk + 1: {b: response_pct for b in BUCKET_KEYS_5}
+                                     for tk in range(K)},
         }
 
     B = bs["bill_value_net"].to_numpy(dtype=float)
@@ -205,8 +219,31 @@ def score_config(
     unreach = is_t1 & (B < reach * V)
     inreach = (~auto) & (~unreach)
     gap = V - B
-    gf = np.where(inreach, 1.0, 0.0)  # flat (gap-aware removed)
-    pc = response_rate * gf
+
+    # Per-bill bucket index (0..4 for the 5 nudgeable buckets).
+    # Edges = [50, 100, 200, 400]; side="left" gives the right intervals:
+    #   gap ≤ 50 → 0 (le_50), 50 < gap ≤ 100 → 1 (50_100), ... > 400 → 4 (gt_400).
+    bucket_idx = np.searchsorted(BUCKET_EDGES, gap, side="left")
+    bucket_idx = np.clip(bucket_idx, 0, 4)
+
+    # Build per-tier per-bucket rate matrix (K × 5). Defaults to flat
+    # `response_rate` everywhere; overrides via `bucket_response_rates` arg.
+    rate_matrix = np.full((K, 5), response_rate, dtype=float)
+    applied_bucket_rates: Dict[int, Dict[str, float]] = {}
+    for tk in range(K):
+        applied_bucket_rates[tk + 1] = {}
+        for bi, bkey in enumerate(BUCKET_KEYS_5):
+            if bucket_response_rates and (tk + 1) in bucket_response_rates \
+                    and bkey in bucket_response_rates[tk + 1]:
+                pct = float(bucket_response_rates[tk + 1][bkey])
+                rate_matrix[tk, bi] = pct / 100.0
+                applied_bucket_rates[tk + 1][bkey] = pct
+            else:
+                applied_bucket_rates[tk + 1][bkey] = response_pct
+
+    # Per-bill conversion probability: lookup into rate matrix; zero out
+    # bills that aren't in-reach.
+    pc = np.where(inreach, rate_matrix[BI, bucket_idx], 0.0)
 
     n_unreach = int(unreach.sum())
     n_inreach = int(inreach.sum())
@@ -290,4 +327,5 @@ def score_config(
             "nudged_total": round(total_nudged, 2),
         },
         "per_tier": per_tier,
+        "applied_bucket_rates": applied_bucket_rates,
     }
