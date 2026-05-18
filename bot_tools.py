@@ -30,6 +30,7 @@ from metrics import (
     score_pair,
     zone_counts,
 )
+from ladder_optimizer import design_ladder
 from personalized_metrics import (
     DEFAULT_BASE_T,
     DEFAULT_CAP_BILLS,
@@ -690,6 +691,74 @@ def find_best_personalized_config(
     }
 
 
+def design_personalized_ladder(
+    objective: str = "max_net",
+    bucket_response_rates: Dict[Any, Any] = None,
+    cashback_pct_of_tier: float = 3.0,
+    prediction_method: str = None,
+    n_tier_range: List[int] = None,
+    constraints: Dict[str, float] = None,
+    nudge_step: int = None,
+    reach_pct: int = None,
+    redemption_pct: int = None,
+    overshoot_pct: int = None,
+    margin_pct: int = None,
+    n_restarts: int = 2,
+    max_iter: int = 20,
+    max_evals: int = 1500,
+    top_k: int = 5,
+) -> Dict[str, Any]:
+    """PERSONALIZED CARROT — full ladder optimisation via random-restart hill
+    climbing on a fast vectorised scorer.
+
+    Searches across tier count (default N=3..5) AND tier values to find the
+    ladder that maximises the chosen `objective` subject to `constraints`,
+    given per-bucket conversion rates and other fixed params. Returns top-k
+    + Pareto frontier.
+
+    Use when the user asks "design me the best ladder with these per-bucket
+    rates" or "what config maximises Net given X constraint?". Far more
+    powerful than `find_best_personalized_config` because it accepts
+    `bucket_response_rates` and uses hill climbing instead of a small grid.
+    """
+    users, april, _ = _personalized_data()
+    current = _personalized_current_settings_from_session()
+
+    # Resolve defaults from session state where not explicitly provided
+    pm = prediction_method or current["prediction_method"]
+    ns = nudge_step if nudge_step is not None else current["nudge_step"]
+    rp = reach_pct if reach_pct is not None else current["reach_pct"]
+    rdp = redemption_pct if redemption_pct is not None else current["redemption_pct"]
+    op = overshoot_pct if overshoot_pct is not None else current["overshoot_pct"]
+    mp = margin_pct if margin_pct is not None else current["margin_pct"]
+    ntr = tuple(n_tier_range) if n_tier_range is not None else (3, 5)
+
+    # bucket_response_rates may come in two shapes:
+    #   { "le_50": 50, "50_100": 30, ... }            — flat (uniform per tier)
+    #   { 1: {"le_50": ...}, 2: {...} }              — per-tier
+    # Pass through unchanged; design_ladder handles both.
+    bucket_rates = bucket_response_rates
+
+    return design_ladder(
+        users, april,
+        objective=objective,
+        bucket_response_rates=bucket_rates,
+        cashback_pct_of_tier=float(cashback_pct_of_tier),
+        prediction_method=pm,
+        n_tier_range=ntr,
+        constraints=constraints,
+        nudge_step=int(ns),
+        reach_pct=int(rp),
+        redemption_pct=int(rdp),
+        overshoot_pct=int(op),
+        margin_pct=int(mp),
+        n_restarts=int(n_restarts),
+        max_iter=int(max_iter),
+        max_evals=int(max_evals),
+        top_k=int(top_k),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tool registry — schemas (OpenAI tool-call format) + dispatch
 # ---------------------------------------------------------------------------
@@ -946,6 +1015,81 @@ TOOL_SCHEMAS.extend([
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "design_personalized_ladder",
+            "description": (
+                "PERSONALIZED CARROT — full ladder design via random-restart hill "
+                "climbing on a fast vectorised scorer. Searches across BOTH tier "
+                "count (default N=3..5) AND tier values. Accepts per-bucket "
+                "conversion rates as a key input. Returns the best ladder + top-k "
+                "alternatives + the Pareto frontier (Net vs Cashback rate). "
+                "USE THIS when the user asks 'design me the best ladder for these "
+                "per-bucket conversion rates' or 'what ladder maximises Net given "
+                "X constraints?'. Far more powerful than find_best_personalized_config "
+                "because it (a) accepts bucket_response_rates, (b) searches tier "
+                "values via hill climbing instead of a small grid, (c) sweeps N too. "
+                "Typical runtime: 30-60 seconds at default settings."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "objective": {
+                        "type": "string",
+                        "enum": ["max_net", "max_rgm", "max_cashback_rate", "max_revenue"],
+                        "default": "max_net",
+                    },
+                    "bucket_response_rates": {
+                        "type": "object",
+                        "description": (
+                            "Per-bucket conversion rates. Two accepted shapes: "
+                            "(a) flat {bucket_key: pct} applied uniformly to every tier, or "
+                            "(b) per-tier {tier_idx: {bucket_key: pct}}. "
+                            "bucket_key ∈ {le_50, 50_100, 100_200, 200_400, gt_400}. "
+                            "Missing entries fall back to defaults (50/30/15/0/0)."
+                        ),
+                    },
+                    "cashback_pct_of_tier": {
+                        "type": "number", "minimum": 0.5, "maximum": 20,
+                        "default": 3.0,
+                        "description": "Cashback ₹ per tier = this % × tier value. Default 3%.",
+                    },
+                    "prediction_method": {
+                        "type": "string",
+                        "enum": ["Average", "P65", "P70", "P75", "P80", "P90", "P95", "Max"],
+                        "description": "Defaults to current sidebar value (typically P75 or P80).",
+                    },
+                    "n_tier_range": {
+                        "type": "array",
+                        "items": {"type": "integer", "minimum": 1, "maximum": 10},
+                        "description": "[min, max] inclusive. Default [3, 5]. Be careful — wider ranges = longer runtime.",
+                    },
+                    "constraints": {
+                        "type": "object",
+                        "description": "Optional filters: cashback_rate_min, cashback_rate_max, net_min, bills_min.",
+                        "properties": {
+                            "cashback_rate_min": {"type": "number"},
+                            "cashback_rate_max": {"type": "number"},
+                            "net_min": {"type": "number"},
+                            "bills_min": {"type": "number"},
+                        },
+                    },
+                    "nudge_step": {"type": "integer", "minimum": 0, "maximum": 300},
+                    "reach_pct": {"type": "integer", "minimum": 50, "maximum": 95},
+                    "redemption_pct": {"type": "integer", "minimum": 0, "maximum": 100},
+                    "overshoot_pct": {"type": "integer", "minimum": 0, "maximum": 100},
+                    "margin_pct": {"type": "integer", "minimum": 1, "maximum": 100},
+                    "n_restarts": {"type": "integer", "minimum": 1, "maximum": 10, "default": 2},
+                    "max_iter": {"type": "integer", "minimum": 5, "maximum": 50, "default": 20},
+                    "max_evals": {"type": "integer", "minimum": 100, "maximum": 5000, "default": 1500,
+                                  "description": "Hard cap on total evaluations across all restarts/N."},
+                    "top_k": {"type": "integer", "minimum": 1, "maximum": 20, "default": 5},
+                },
+                "required": [],
+            },
+        },
+    },
 ])
 
 _DISPATCH = {
@@ -957,6 +1101,7 @@ _DISPATCH = {
     "get_personalized_state": get_personalized_state,
     "evaluate_personalized_config": evaluate_personalized_config,
     "find_best_personalized_config": find_best_personalized_config,
+    "design_personalized_ladder": design_personalized_ladder,
 }
 
 
