@@ -172,18 +172,9 @@ def _serialize_chats(chats: dict) -> bytes:
     for chat_id, chat in ordered_chats:
         msgs = chat.get("messages", []) or []
         kept = [m for m in msgs if m.get("role") != "system"]
+        # Skip chats with no real messages — they're transient "New chat" tabs
+        # the user opened but didn't use. Don't pollute the CSV with placeholders.
         if not kept:
-            # Persist a placeholder row so empty "New chat" tabs survive refresh.
-            # Without this, clicking "+ New chat" then refreshing loses the tab.
-            writer.writerow([
-                chat_id,
-                chat.get("created_at", ""),
-                chat.get("title", "New chat"),
-                0,
-                "",          # role placeholder
-                "",          # preview placeholder
-                "{}",        # message_json placeholder (deserialized as empty)
-            ])
             continue
         for idx, m in enumerate(kept):
             content = m.get("content") or ""
@@ -227,10 +218,6 @@ def _deserialize_chats(content_bytes: bytes) -> dict:
                 "role": row.get("msg_role") or "user",
                 "content": row.get("content_preview") or "",
             }
-        # Placeholder rows for empty chats: role/content blank — skip them so
-        # the chat starts cleanly with just the system prompt.
-        if not m.get("role") and not m.get("content"):
-            continue
         chats[cid]["_msgs"].append((int(row.get("msg_index") or 0), m))
 
     # Sort by msg_index and prepend system prompt
